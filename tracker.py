@@ -1,160 +1,267 @@
-import cv2
-from preprocess import ProcessPipeline
-import imutils
-
 from utils import *
-from object_detector import ObjectDetector
-from face_detector import FaceDetector
 
 
 class Tracker:
 
-    def __init__(self, tracker, id):
+    nextID = 0
+
+    def __init__(self, tracker, id=None, eps=5):
+        """
+        Tracker constructor
+        :param tracker: object of type cv2.Tracker
+        :param id: id of the tracker; if None, it will be auto-assigned
+        :param eps: difference in pixels within which it is considered that the object's bounding box is not moving
+        """
+        self.position = None
+        self.speed = None
         self.tracker = tracker
-        self.id = id
+        self.numFailures = 0
+        self.eps = eps
+        self.lastBBox = None
+        self.lastSuccess = None
+        if id is None:
+            self.id = Tracker.nextID
+            Tracker.nextID += 1
+        else:
+            self.id = id
 
-    def getID(self):
-        return self.id
+    def init(self, frame, obj_bbox):
+        """
+        Tracker initialization
+        :param frame: first frame seen from the tracker
+        :param obj_bbox: bounding box (as (x,y,w,h)) of the object to be tracked
+        :return: True if initialization went successfully, False otherwise
+        """
+        self.position = obj_bbox[0] + obj_bbox[2] // 2, obj_bbox[1] + obj_bbox[3] // 2  # x+w//2, y+h//2
+        return self.tracker.init(frame, obj_bbox)
 
-    def __getattr__(self, *args):
-        return self.tracker.__getattribute__(*args)
+    def update(self, frame):
+        """
+        Update the tracker, finding the new most likely bounding box for the target
+        :param frame: the frame where to search for the object
+        :return: a tuple (s, b); s is a boolean that indicates if target has been successfully located; b is bounding box that represent the new target location, if s=True was returned
+        """
+        s, b = self.tracker.update(frame)
+        b = [int(max([k, 0])) for k in b]
+        b[0] = min(b[0], frame.shape[1]-1)           # x < frame_width
+        b[1] = min(b[1], frame.shape[0]-1)           # y < frame_height
+        b[2] = min(b[2], frame.shape[1]-1-b[0])      # w < frame_width - x
+        b[3] = min(b[3], frame.shape[0]-1-b[1])      # h < frame_height - y
+        position = b[0] + b[2]//2, b[1] + b[3]//2    # x+w//2, y+h//2
+        self.speed = (position[0]-self.position[0], position[1]-self.position[1])
+        if not s:
+            self.numFailures += 1
+        elif abs(self.speed[0]) <= self.eps and abs(self.speed[1]) <= self.eps:
+            self.numFailures += 2
+        else:
+            self.numFailures = 0
+        self.position = position
+        return s, b
 
 
 class TrackerManager:
-    def __init__(self):
-        self.trackers = cv2.MultiTracker_create()
-        self.objectsIDs = []
-        self.nextID = 0
-        # self.pastObjects = []
+    def __init__(self, nameDefaultTracker, maxFailures=80):
+        """
+        TrackerManager constructor
+        :param nameDefaultTracker: name of the tracker that will be created in addTracker (if not specified otherwise there)
+        :param maxFailures: maximum number of consecutive frames in which the tracker can fail, beyond which it will be automatically destroyed
+        """
+        self.trackers = []
+        self.nameDefaultTracker = nameDefaultTracker
+        self.maxFailures = maxFailures
 
-    def addTracker(self, trackerName, frame, obj, objID):
+    def addTracker(self, frame, obj_bbox, trackerName=None):
+        """
+        Add a tracker to the list of managed trackers, initializing it with its first frame and bbox
+        :param frame: first frame for the created tracker
+        :param obj_bbox: bounding box (as (x,y,w,h)) of the object to be tracked
+        :param trackerName: name of the tracker that will be created in addTracker (if None, default is considered)
+        :return: the created tracker
+        """
+        if trackerName is None:
+            trackerName = self.nameDefaultTracker
         if trackerName == "MOSSE":
-            tracker = cv2.TrackerMOSSE_create()
+            tracker = Tracker(cv2.TrackerMOSSE_create())
         elif trackerName == "KCF":
-            tracker = cv2.TrackerKCF_create()
+            tracker = Tracker(cv2.TrackerKCF_create())
         elif trackerName == "CSRT":
-            tracker = cv2.TrackerCSRT_create()
+            tracker = Tracker(cv2.TrackerCSRT_create())
         else:
             print("unknown tracker")
             exit(1)
-        self.trackers.add(tracker, frame, obj)
-        self.objectsIDs.append(objID)
 
-    def deleteAllTrackers(self):
-        self.trackers = cv2.MultiTracker_create()
-        self.objectsIDs = []
+        tracker.init(frame, obj_bbox)
+        self.trackers.append(tracker)
+        return tracker
 
-    def update(self, frame, detectedObjects):
-        (success, trackedObjects) = self.trackers.update(frame)
-        trackedObjects = [[int(min([max([k, 0]), 1920])) for k in obj] for obj in trackedObjects] # TODO remove that 1920
+    def _update(self, frame):
+        """
+        Updates all trackers on the given frame. No merge with detection is considered here.
+        :param frame: the frame where to search for the objects
+        :return: a tuple of lists (ls, lb); ls is a list of boolean (True if the object is successfully located); lb is a list of bounding boxes, each of them represents an object's location
+        """
+        successes = []
+        bboxes = []
+        for i, tracker in enumerate(self.trackers):
+            s, b = tracker.update(frame)
+            if not s and b == [0,0,0,0] and tracker.lastBBox is not None:
+                b = tracker.lastBBox
+            else:
+                tracker.lastBBox = b
+            tracker.lastSuccess = s
+            successes.append(s)
+            bboxes.append(b)
+            
+        idxsSuppressed = self.suppressDuplicateTrackers(bboxes, frame.shape)
+        successes = [successes[i] for i in range(len(successes)) if i not in idxsSuppressed]
+        bboxes = [bboxes[i] for i in range(len(bboxes)) if i not in idxsSuppressed]
+        
+        return successes, bboxes
 
+    def update(self, frame, detectedObjects=None, maintainDetected=True):
+        """
+        Updates all trackers on the given frame. Eventually merge with detection.
+        :param frame: the frame where to search for the objects
+        :param detectedObjects: the list of bounding boxes (as (x,y,w,h)) given by an external object detector
+        :param maintainDetected: True to maintain detector's bounding boxes in case of overlaps with trackers' bounding boxes, False to maintain the latter
+        :return: a tuple of lists (ls, lb); ls is a list of boolean (True if the object is successfully located); lb is a list of bounding boxes, each of them represents an object's location
+        """
+        successes, bboxes = self._update(frame)
+
+        if detectedObjects is not None and detectedObjects != []:
+            trkIDs = self.getIDs()
+            successes, bboxes, trkIDs, news = self.mergeBBoxes(successes, bboxes, detectedObjects, trkIDs=trkIDs, maintainDetected=maintainDetected)
+
+            for bbox, objID, new in zip(bboxes, trkIDs, news):
+                if new:
+                    if objID == -1:
+                        self.addTracker(frame, bbox)
+                    else:
+                        self.reinitTracker(objID, frame, bbox)
+        assert len(successes) == len(bboxes)
+        return successes, bboxes
+
+    def mergeBBoxes(self, trkSuccesses, trackedObjects, detectedObjects, threshold=0.2, trkIDs=None, maintainDetected=True):
+        """
+        Merge trackers' and detector's bounding boxes, resolving the conflicts (overlaps)
+        :param trkSuccesses: successes returned by _update(frame)
+        :param trackedObjects: bboxes returned by _update(frame)
+        :param detectedObjects: the list of bounding boxes (as (x,y,w,h)) given by an external object detector
+        :param threshold: minimum intersection over union to consider overlap between to different bounding boxes
+        :param trkIDs: identifiers of tracked objects
+        :param maintainDetected: True to maintain detector's bounding boxes in case of overlaps with trackers' bounding boxes, False to maintain the latter
+        :return: a 4-tuple of lists (ls, lb, ); ls is a list of boolean (True if the object is successfully located); lb is a list of bounding boxes, each of them represents an object's location
+        """
+        assert trkIDs is not None
+        assert len(trkIDs) == len(trackedObjects)
+        assert len(trkSuccesses) == len(trackedObjects)
+        if detectedObjects is None:
+            detectedObjects = []
+
+        bboxes = copy.deepcopy(detectedObjects)
+        successes = [True for x in bboxes]
+        objIDs = [-1 for x in bboxes]
+        news = [True for x in bboxes]
+
+        toAdd = []
+        for t, (trkObj, trkID) in enumerate(zip(trackedObjects, trkIDs)):
+            iouMax = 0
+            iMax = -1
+            for d in range(len(detectedObjects)):
+                detObj = detectedObjects[d]
+                tmp_iou = intersectionOverUnion(detObj, trkObj)
+                if tmp_iou >= threshold and tmp_iou > iouMax:
+                    iouMax = tmp_iou
+                    iMax = d
+            if iMax != -1:
+                objIDs[iMax] = trkID
+                if not maintainDetected:
+                    bboxes[iMax] = trkObj
+                    news[iMax] = False
+                    successes[iMax] = trkSuccesses[t]
+            else:
+                toAdd.append(t)
+
+        for t in toAdd:
+            bboxes.append(trackedObjects[t])
+            objIDs.append(trkIDs[t])
+            news.append(False)
+            successes.append(trkSuccesses[t])
+
+        successes, bboxes, objIDs, news = [list(l) for l in zip(*sorted(zip(successes, bboxes, objIDs, news), key=lambda x: x[2] + 10**8*(1-np.sign(x[2]))*abs(x[2])))]
+
+        return successes, bboxes, objIDs, news
+
+    def removeDeadTrackers(self):
+        """
+        Remove all trackers that has exceeded the number of maximum allowed failures
+        """
+        self.trackers = [tracker for tracker in self.trackers if tracker.numFailures <= self.maxFailures]
+
+    def getIDs(self):
+        """
+        Obtain the identifiers of the managed trackers
+        :return: a list of identifiers of the managed trackers
+        """
+        return [tracker.id for tracker in self.trackers]
+
+    def removeTracker(self, objID):
+        """
+        Remove a specific tracker, identified by its own ID
+        :param objID: identifier of the tracker to be removed
+        :return: True if a tracker is removed, False otherwise
+        """
+        for t in range(len(self.trackers)):
+            if self.trackers[t].id == objID:
+                self.trackers.pop(t)
+                return True
+        return False
+
+    def reinitTracker(self, objID, frame, obj):
+        """
+        Create and initialize a new tracker that replaces an existing one, while maintaining the same identifier (this is necessary when we want to force the change of object bounding box)
+        :param objID:
+        :param frame:
+        :param obj:
+        :return:
+        """
+        for t in range(len(self.trackers)):
+            if self.trackers[t].id == objID:
+                clsName = str(self.trackers[t].tracker.__class__)
+                clsName = clsName[clsName.index("'")+1: clsName.rindex("'")]
+                tracker = Tracker(eval(clsName + "_create()"), id=objID)
+                tracker.init(frame, obj)
+                self.trackers[t] = tracker
+        return False
+
+    def suppressDuplicateTrackers(self, bboxes, frame_shape, threshold=0.75):
+        """
+        Suppress different trackers that are tracking the same object, leaving one tracker only for object. For the similarity score, are considered the intersection over union, the distance between centers, and the difference in speed
+        :param bboxes: list of bounding boxes of the objects
+        :param frame_shape: shape of the frame, useful to normalize the distance between bounding boxes
+        :param threshold: minimum value of similarity score between two different bounding boxes to consider them referring to the same object
+        :return: list of indexes (not identifiers) of removed trackers
+        """
+        removingIndexes = []
         affinityList = []
-        previousObjectsIDs = self.objectsIDs
-        self.objectsIDs = []
-        for d in range(len(detectedObjects)):
-            detObj = detectedObjects[d]
-            self.objectsIDs.append(-1)
-            for t in range(len(trackedObjects)):
-                trkObj = trackedObjects[t]
-                iou = intersectionOverUnion(detObj, trkObj)
-                affinityList.append([d, t, iou])
-        # sort by decreasing Intersection over Union
+        for i, (trackerI, bboxI) in enumerate(zip(self.trackers, bboxes)):
+            for j, (trackerJ, bboxJ) in enumerate(zip(self.trackers, bboxes)):
+                if i == j or bboxI[0]*bboxI[1] < bboxJ[0]*bboxJ[1]:
+                    continue
+                iou = intersectionOverUnion(bboxI, bboxJ)
+                dist = distance(bboxI, bboxJ)
+                normDist = dist / np.sqrt(frame_shape[0]**2 + frame_shape[1]**2)
+                deltaSpeed = np.sqrt((trackerI.speed[0]-trackerJ.speed[0])**2 + (trackerI.speed[1]-trackerJ.speed[1])**2) /\
+                             np.sqrt((2*frame_shape[0])**2 + (2*frame_shape[1])**2)
+                score = (iou + (1-normDist) + (1-deltaSpeed)) / 3    # number between 0 and 1: if high, bboxI and bboxJ refers to the same object
+                if score >= threshold:
+                    affinityList.append([i, j, score])
         affinityList = sorted(affinityList, key=lambda x:x[2], reverse=True)
-        for d, t, iou in affinityList:
-            if previousObjectsIDs[t] in self.objectsIDs or self.objectsIDs[d] != -1:
+        for i, j, score in affinityList:
+            removingIndexes.append(j)
+        removingIndexes = sorted(removingIndexes, reverse=True)
+        for i, j in enumerate(removingIndexes):
+            if i > 0 and removingIndexes[i-1] == j:
                 continue
-            self.objectsIDs[d] = previousObjectsIDs[t]
-
-        for d in range(len(detectedObjects)):
-            if self.objectsIDs[d] == -1:
-                self.objectsIDs[d] = self.nextID
-                self.nextID += 1
-
-        return self.objectsIDs
-
-
-def main():
-    ''' input '''
-    # file video
-    #captureSource = 'video/video.mp4'
-    #captureSource = 'video/video2.mp4'
-    #captureSource = 'video/video3.mp4'
-    captureSource = 'video/video_116_1.mp4'
-    #captureSource = 'video/prova.mp4'
-    #captureSource = 'video/far.mp4'
-    # webcam
-    #captureSource = 0
-    cap = cv2.VideoCapture(captureSource)
-
-    ''' trackers typology '''
-    trackerName = "MOSSE"  # "MOSSE" | "KCF" | "CSRT"
-    tm = TrackerManager()
-
-    ''' detector definition '''
-    #bgSubtractor = cv2.bgsegm.createBackgroundSubtractorMOG(history=200, nmixtures=5, backgroundRatio=0.7, noiseSigma=0)
-    #bgSubtractor = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16,	detectShadows=True)
-    #bgSubtractor = cv2.bgsegm.createBackgroundSubtractorGMG(initializationFrames=120, decisionThreshold=0.8) #orig, bad
-    #bgSubtractor = cv2.bgsegm.createBackgroundSubtractorGMG(initializationFrames=20, decisionThreshold=0.9999) # a little better
-    bgSubtractor = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=400.0, detectShadows=True)
-
-    pipeline = ProcessPipeline()
-    pipeline \
-        .add(cv2.medianBlur, ksize=5) \
-        .add(cv2.dilate, kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)))
-    # fgmask_f = cv2.filter2D(fgmask, -1, kernel)
-    od = ObjectDetector(bgSubtractor, pipeline)
-    fd = FaceDetector()
-
-    ''' auto-definition of output folder '''
-    outputDir = "output"
-    if captureSource == 0:
-        outputDir = os.path.join(outputDir, "webcam")
-    else:
-        outputDir = os.path.join(outputDir, captureSource[:captureSource.find(".")])
-    outputDir = os.path.join(outputDir, trackerName)
-
-    ''' cycle begins '''
-    show = True
-    scale = 2
-    while True:
-
-        ''' handle input '''
-        k = cv2.waitKey(30) & 0xff
-        if k == 27:
-            break
-        elif k == ord(' '):
-            show = not show
-        if not show:
-            continue
-
-        ''' reading next frame '''
-        ret, frameOrig = cap.read()
-        if not ret:
-            break
-        frameOrig = cv2.flip(frameOrig, 1)
-        frame = imutils.resize(frameOrig, width=frameOrig.shape[1]//scale)
-
-        ''' detection by background subtraction '''
-        objects = od.detect(frame)
-
-        ''' objects tracking, faces detection'''
-        objIDs = tm.update(frame, objects)
-        faces_bboxes = fd.detectFaces(frame, objects, objIDs)
-        tm.deleteAllTrackers()
-        for obj, objID in zip(objects, objIDs):
-            tm.addTracker(trackerName, frame, obj, objID)
-
-        ''' images merging and show '''
-        frameOrig = draw_bboxes(frameOrig, objects, (255,0,0), objIDs, scale=scale)
-        frameOrig = draw_bboxes(frameOrig, faces_bboxes, (0,255,0), scale=scale)
-        frameOrig = cv2.resize(frameOrig, (640, 640))
-        cv2.imshow('frame', frameOrig)
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-    fd.dump(outputDir)
-
-
-if __name__ == "__main__":
-    main()
+            self.trackers.pop(j)
+        return removingIndexes
