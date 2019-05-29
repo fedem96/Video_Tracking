@@ -9,23 +9,29 @@ from preprocess import ProcessPipeline, CompositeBackgroundSubtractor
 from tracker import TrackerManager
 from utils import fillHoles, draw_bboxes
 
+"""
+Given an input stream, we combine object detection via background subtraction and a tracking algorithm in order to identify people that appear in the video.
+For each identified person, will be stored the best faces that we managed to get from the video.
+Changing the video stream, the background subtractor, the pipeline steps, the tracking algorithm and/or their parameters, will lead to different results.
+"""
+
 
 def main():
     ''' input '''
-    # file video
-    # captureSource = 'video/living_room_clear_allWhite_light.mp4' # questo per vedere quando bg subtractor non funzionano
+    # choose the input stream
     #captureSource = "video/video_116.mp4"
     captureSource = "video/video_205.mp4"
     #captureSource = "video/video_white.mp4"
-    # webcam
-    #captureSource = 0
+    #captureSource = 0  # webcam
     cap = cv2.VideoCapture(captureSource)
 
     ''' trackers typology '''
+    # choose the tracker
     trackerName = "CSRT"  # "MOSSE" | "KCF" | "CSRT"
     tm = TrackerManager(trackerName, maxFailures=20)
 
     ''' parameters '''
+    # try to change these parameters
     period = 1                  # length of the period: only on the first frame of the period we detect objects (instead, we track them in every frame)
     maintainDetected = True     # True if in transition frames, in case of overlapping bboxes,  we want to keep those of the detector (False if we want to keep those of the tracker)
     frameWidth = 512
@@ -38,12 +44,15 @@ def main():
     # bgSubtractor = CompositeBackgroundSubtractor(bgSubtractor1, bgSubtractor2, ...)
 
     ''' background subtractor '''
+    # define a background subtractor to be used for object detection
     #bgSubtractor = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=25, detectShadows=True)     # good for video/video_116.mp4
     bgSubtractor = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=500.0, detectShadows=True) # good for video/video_205.mp4
     # bgSubtractor = CompositeBackgroundSubtractor(
     #     cv2.bgsegm.createBackgroundSubtractorMOG(history=600, nmixtures=3, backgroundRatio=0.2, noiseSigma=2.3),
     #     cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=14, detectShadows=True)) # good for video/video_white.mp4
 
+    ''' pipeline '''
+    # define the pipeline of functions to be executed on the b/w image, after the background subtraction and before getting bounding rects of contours
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     pipeline = ProcessPipeline()
     pipeline \
@@ -57,6 +66,7 @@ def main():
         .add(cv2.erode, kernel=kernel) \
         .add(cv2.erode, kernel=kernel) \
 
+    ''' create object detector and face detector '''
     od = ObjectDetector(bgSubtractor, pipeline)
     fd = FaceDetector()
 
@@ -100,7 +110,6 @@ def main():
         if not ret:
             break
         frameOrig = cv2.flip(frameOrig, 1)
-        #frame = imutils.resize(frameOrig, width=frameOrig.shape[1]//scale)
         frame = imutils.resize(frameOrig, width=frameWidth)
         scale = frameOrig.shape[1] / frameWidth
 
@@ -120,9 +129,7 @@ def main():
         succ_objIDs = [objID for suc, objID in zip(success, objIDs) if suc]
         objects = [obj for suc, obj in zip(success, objects) if suc]
 
-        assert len(objects) == len(succ_objIDs)
-        assert len(failed_objIDs) == len(failed_objects)
-
+        ''' detection of faces '''
         faces_bboxes = fd.detectFaces(frameOrig, objects, objIDs, scale=scale)
 
         ''' images merging and show '''
@@ -132,6 +139,7 @@ def main():
         frameOrig = cv2.resize(frameOrig, (640, 640))
         cv2.imshow('frame', frameOrig)
 
+        ''' some stats '''
         frameNumber += 1
         end = timer()
         frames = eta + (1-eta)*frames
@@ -143,6 +151,7 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
 
+    ''' save on disk '''
     fd.dump(outputDir)
 
     avgFPS = str(round(frameNumber / totalTime, 2))

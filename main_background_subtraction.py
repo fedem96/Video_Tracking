@@ -5,9 +5,15 @@ from object_detector import ObjectDetector
 from preprocess import CompositeBackgroundSubtractor, ProcessPipeline
 from utils import mergeImgs, draw_bboxes, fillHoles
 
+"""
+For the same input stream, are compared simultaneously different background subtractors and the corresponding results in terms of object detection.
+After subtraction of the background and before the actual detection, functions can be applied to the b/w mask returned by the background subtractor, in order to have a better detection.
+"""
+
 
 def main():
-    ''' select video source '''
+    ''' input '''
+    # choose the input stream
     #captureSource = 0  # webcam
     #captureSource = 'video/video_116.mp4'
     captureSource = 'video/video_205.mp4'
@@ -32,7 +38,6 @@ def main():
 
     ''' pipeline steps applied after background subtraction '''
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    # pipeline = ProcessPipeline().add(cv2.medianBlur, ksize=5)#.add(functionName, key=value).add(...)
     pipeline = ProcessPipeline()
     pipeline \
         .add(cv2.medianBlur, ksize=5) \
@@ -70,7 +75,6 @@ def main():
         ret, frame = cap.read()
         if not ret:
             break
-        #frame = imutils.resize(frame, width=frame.shape[1] // 2)
         frame = imutils.resize(frame, width=512)
         frame = cv2.flip(frame, 1)
 
