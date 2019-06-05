@@ -5,7 +5,7 @@ import os
 cap = cv2.VideoCapture(0)
 
 # output file
-outputFile = "video/living_room_clear_allWhite_light_dark_2.mp4"
+outputFile = "video/name_of_the_video.mp4"
 
 if os.path.exists(outputFile):
     i = ""

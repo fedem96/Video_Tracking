@@ -126,19 +126,22 @@ class TrackerManager:
         :param maintainDetected: True to maintain detector's bounding boxes in case of overlaps with trackers' bounding boxes, False to maintain the latter
         :return: a tuple of lists (ls, lb); ls is a list of boolean (True if the object is successfully located); lb is a list of bounding boxes, each of them represents an object's location
         """
-        successes, bboxes = self._update(frame)
+        successes, bboxes = self._update(frame)  # update all trackers (without merging bounding boxes)
 
         if detectedObjects is not None and detectedObjects != []:
-            trkIDs = self.getIDs()
-            successes, bboxes, trkIDs, news = self.mergeBBoxes(successes, bboxes, detectedObjects, trkIDs=trkIDs, maintainDetected=maintainDetected)
-
-            for bbox, objID, new in zip(bboxes, trkIDs, news):
-                if new:
+            trkIDs = self.getIDs()   # get the IDs of tracked objects
+            successes, bboxes, objIDs, changes = self.mergeBBoxes(successes, bboxes, detectedObjects, trkIDs=trkIDs, maintainDetected=maintainDetected)
+            # these 4 lists above are all of the same length, each one is related to the others (i.e., the same index refers to the same object)
+            # successes: list of booleans; element i-th is True if tracker of index (not id!) i has successfully located the target
+            # bboxes:    list of bounding boxes; element i-th is the bounding box (x,y,w,h) of object i-th
+            # objIDs:    list of identifiers (integers); element i-th is >= 0 if the object already had an identifier, otherwise -1
+            # changes:   list of booleans; element i-th is True if bounding box of index (not id!) i have been detected or changed by the detector (in this frame)
+            for bbox, objID, change in zip(bboxes, objIDs, changes):
+                if change:
                     if objID == -1:
                         self.addTracker(frame, bbox)
                     else:
                         self.reinitTracker(objID, frame, bbox)
-        assert len(successes) == len(bboxes)
         return successes, bboxes
 
     def mergeBBoxes(self, trkSuccesses, trackedObjects, detectedObjects, threshold=0.2, trkIDs=None, maintainDetected=True):
@@ -161,7 +164,7 @@ class TrackerManager:
         bboxes = copy.deepcopy(detectedObjects)
         successes = [True for x in bboxes]
         objIDs = [-1 for x in bboxes]
-        news = [True for x in bboxes]
+        changes = [True for x in bboxes]
 
         toAdd = []
         for t, (trkObj, trkID) in enumerate(zip(trackedObjects, trkIDs)):
@@ -177,7 +180,7 @@ class TrackerManager:
                 objIDs[iMax] = trkID
                 if not maintainDetected:
                     bboxes[iMax] = trkObj
-                    news[iMax] = False
+                    changes[iMax] = False
                     successes[iMax] = trkSuccesses[t]
             else:
                 toAdd.append(t)
@@ -185,12 +188,12 @@ class TrackerManager:
         for t in toAdd:
             bboxes.append(trackedObjects[t])
             objIDs.append(trkIDs[t])
-            news.append(False)
+            changes.append(False)
             successes.append(trkSuccesses[t])
 
-        successes, bboxes, objIDs, news = [list(l) for l in zip(*sorted(zip(successes, bboxes, objIDs, news), key=lambda x: x[2] + 10**8*(1-np.sign(x[2]))*abs(x[2])))]
+        successes, bboxes, objIDs, changes = [list(l) for l in zip(*sorted(zip(successes, bboxes, objIDs, changes), key=lambda x: x[2] + 10**8*(1-np.sign(x[2]))*abs(x[2])))]
 
-        return successes, bboxes, objIDs, news
+        return successes, bboxes, objIDs, changes
 
     def removeDeadTrackers(self):
         """
@@ -217,12 +220,12 @@ class TrackerManager:
                 return True
         return False
 
-    def reinitTracker(self, objID, frame, obj):
+    def reinitTracker(self, objID, frame, obj_bbox):
         """
         Create and initialize a new tracker that replaces an existing one, while maintaining the same identifier (this is necessary when we want to force the change of object bounding box)
         :param objID:
         :param frame:
-        :param obj:
+        :param obj_bbox:
         :return:
         """
         for t in range(len(self.trackers)):
@@ -230,7 +233,7 @@ class TrackerManager:
                 clsName = str(self.trackers[t].tracker.__class__)
                 clsName = clsName[clsName.index("'")+1: clsName.rindex("'")]
                 tracker = Tracker(eval(clsName + "_create()"), id=objID)
-                tracker.init(frame, obj)
+                tracker.init(frame, obj_bbox)
                 self.trackers[t] = tracker
         return False
 

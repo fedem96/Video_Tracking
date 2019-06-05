@@ -69,7 +69,7 @@ class FaceDetector:
         faces = []
         gray = cv2.cvtColor(img_obj, cv2.COLOR_BGR2GRAY)
 
-        faces_bboxes = self.frontalface_cascade.detectMultiScale(gray, 1.3, 5)  # TODO capire questi parametri
+        faces_bboxes = self.frontalface_cascade.detectMultiScale(gray, 1.3, 5)
         for (x, y, w, h) in faces_bboxes:
             imgFace = img_obj[y: y + h, x: x + w]
             imgFaceGray = gray[y: y + h, x: x + w]
