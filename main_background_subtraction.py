@@ -40,9 +40,15 @@ def main():
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     pipeline = ProcessPipeline()
     pipeline \
+        .add(cv2.medianBlur, ksize=5) \
+        .add(cv2.dilate, kernel=kernel) \
+        .add(cv2.dilate, kernel=kernel) \
+        .add(cv2.dilate, kernel=kernel) \
         .add(cv2.dilate, kernel=kernel) \
         .add(cv2.dilate, kernel=kernel) \
         .add(fillHoles) \
+        .add(cv2.erode, kernel=kernel) \
+        .add(cv2.erode, kernel=kernel)
 
     ''' detectors creation and beginning of video analysis '''
     detectors = [ObjectDetector(bgSub, pipeline) for bgSub in backgroundSubtractors]

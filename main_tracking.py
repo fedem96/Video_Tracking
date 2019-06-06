@@ -32,8 +32,8 @@ def main():
 
     ''' parameters '''
     # try to change these parameters
-    period = 50                  # length of the period: only on the first frame of the period we detect objects (instead, we track them in every frame)
-    maintainDetected = False     # True if in transition frames, in case of overlapping bboxes,  we want to keep those of the detector (False if we want to keep those of the tracker)
+    period = 1                  # length of the period: only on the first frame of the period we detect objects (instead, we track them in every frame)
+    maintainDetected = True     # True if in transition frames, in case of overlapping bboxes,  we want to keep those of the detector (False if we want to keep those of the tracker)
     frameWidth = 512
 
     ''' some background subtractor with default params '''
