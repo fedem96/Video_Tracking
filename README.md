@@ -40,6 +40,8 @@ with details of the intermediate outputs (one column for each intermediate mask 
 
 If you want to use a different detector (e.g.: a Convolutional Neural Network), to interface it with this project you simply have to implement a *detect* method: check ObjectDetector class inside `object_detector.py`.
 
+Remark: background subtraction can be used only in the case in which the camera is static; if instead the camera moves during the video recording, other techniques must be considered to locate the objects.
+
 ### Object tracker
 By changing a few lines of code (about tracker initialization, inside `tracker.py`), all OpenCV tracking algorithms<sup>[1](#note1)</sup> can be used. We tried these three:
 
